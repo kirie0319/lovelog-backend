@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import FastAPI, Depends, HTTPException, status, Request
 from fastapi.security import HTTPBearer
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -13,6 +13,8 @@ from auth import (
     get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
 )
 from config import settings
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 # データベーステーブルの作成
 Base.metadata.create_all(bind=engine)
@@ -32,56 +34,78 @@ app.add_middleware(
 @app.post("/auth/register", response_model=schemas.TokenResponse)
 def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     """新規ユーザー登録"""
-    # ユーザー名とメールの重複チェック
-    db_user = db.query(User).filter(
-        (User.username == user.username) | 
-        (User.email == user.email)
-    ).first()
-    
-    if db_user:
-        raise HTTPException(
-            status_code=400, 
-            detail="Username or email already registered"
+    try:
+        print(f"Registration attempt for user: {user.username}, email: {user.email}")
+        
+        # ユーザー名とメールの重複チェック
+        db_user = db.query(User).filter(
+            (User.username == user.username) | 
+            (User.email == user.email)
+        ).first()
+        
+        if db_user:
+            print(f"Duplicate user found: username={db_user.username}, email={db_user.email}")
+            raise HTTPException(
+                status_code=400, 
+                detail="Username or email already registered"
+            )
+        
+        # パスワードをハッシュ化
+        hashed_password = hash_password(user.password)
+        print("Password hashed successfully")
+        
+        # 一意の招待コードを生成
+        invite_code = str(uuid.uuid4())
+        print(f"Generated invite code: {invite_code}")
+        
+        # ユーザー作成
+        db_user = User(
+            username=user.username,
+            email=user.email,
+            display_name=user.display_name,
+            profile_image_url=user.profile_image_url,
+            password_hash=hashed_password,
+            invite_code=invite_code
         )
-    
-    # パスワードをハッシュ化
-    hashed_password = hash_password(user.password)
-    
-    # 一意の招待コードを生成
-    invite_code = str(uuid.uuid4())
-    
-    # ユーザー作成
-    db_user = User(
-        username=user.username,
-        email=user.email,
-        display_name=user.display_name,
-        profile_image_url=user.profile_image_url,
-        password_hash=hashed_password,
-        invite_code=invite_code
-    )
-    
-    db.add(db_user)
-    db.commit()
-    db.refresh(db_user)
-    
-    # アクセストークン生成
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": str(db_user.user_id)}, expires_delta=access_token_expires
-    )
-    
-    # ユーザー情報を返す
-    user_with_partner = schemas.UserWithPartner(
-        **db_user.__dict__,
-        partner=None,
-        has_partner=False
-    )
-    
-    return schemas.TokenResponse(
-        access_token=access_token,
-        token_type="bearer",
-        user=user_with_partner
-    )
+        
+        print("User object created, attempting to save to database...")
+        db.add(db_user)
+        db.commit()
+        db.refresh(db_user)
+        print(f"User saved successfully with ID: {db_user.user_id}")
+        
+        # アクセストークン生成
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": str(db_user.user_id)}, expires_delta=access_token_expires
+        )
+        print("Access token created successfully")
+        
+        # ユーザー情報を返す
+        user_with_partner = schemas.UserWithPartner(
+            **db_user.__dict__,
+            partner=None,
+            has_partner=False
+        )
+        
+        return schemas.TokenResponse(
+            access_token=access_token,
+            token_type="bearer",
+            user=user_with_partner
+        )
+        
+    except HTTPException:
+        # HTTPExceptionは再発生させる
+        raise
+    except Exception as e:
+        print(f"Unexpected error during registration: {str(e)}")
+        print(f"Error type: {type(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
 
 @app.post("/auth/login", response_model=schemas.TokenResponse)
 def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
@@ -547,6 +571,15 @@ def mark_messages_as_read(
 @app.get("/")
 def read_root():
     return {"message": "Couple Chat API is running"}
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    print(f"Validation error: {exc.errors()}")
+    print(f"Request body: {await request.body()}")
+    return JSONResponse(
+        status_code=422,
+        content={"detail": exc.errors(), "body": str(await request.body())}
+    )
 
 if __name__ == "__main__":
     import uvicorn
