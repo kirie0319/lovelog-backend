@@ -22,13 +22,50 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="Couple Chat API", description="カップル専用チャットアプリのAPI")
 
 # CORS設定
+print(f"Setting up CORS with origins: {settings.CORS_ALLOW_ORIGINS}")
+print(f"CORS credentials: {settings.CORS_ALLOW_CREDENTIALS}")
+print(f"CORS methods: {settings.CORS_ALLOW_METHODS}")
+print(f"CORS headers: {settings.CORS_ALLOW_HEADERS}")
+
+# より厳密なCORS設定
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.CORS_ALLOW_ORIGINS,
     allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
     allow_methods=settings.CORS_ALLOW_METHODS,
     allow_headers=settings.CORS_ALLOW_HEADERS,
+    expose_headers=["*"],
+    max_age=3600,  # プリフライトキャッシュ時間
 )
+
+# 明示的なプリフライトリクエストハンドリング
+@app.options("/{path:path}")
+async def options_handler(request: Request, path: str):
+    """Handle preflight OPTIONS requests explicitly"""
+    origin = request.headers.get("origin")
+    print(f"OPTIONS request from origin: {origin}")
+    
+    # オリジンが許可リストにあるかチェック
+    if origin in settings.CORS_ALLOW_ORIGINS:
+        headers = {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Methods": ",".join(settings.CORS_ALLOW_METHODS),
+            "Access-Control-Allow-Headers": ",".join(settings.CORS_ALLOW_HEADERS),
+            "Access-Control-Allow-Credentials": "true" if settings.CORS_ALLOW_CREDENTIALS else "false",
+            "Access-Control-Max-Age": "3600"
+        }
+        return JSONResponse(content={"message": "OK"}, headers=headers)
+    
+    return JSONResponse(content={"message": "CORS not allowed"}, status_code=403)
+
+# リクエストログ用のミドルウェア
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    print(f"Request: {request.method} {request.url}")
+    print(f"Headers: {dict(request.headers)}")
+    response = await call_next(request)
+    print(f"Response status: {response.status_code}")
+    return response
 
 # 認証関連のエンドポイント
 @app.post("/auth/register", response_model=schemas.TokenResponse)
@@ -110,45 +147,66 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
 @app.post("/auth/login", response_model=schemas.TokenResponse)
 def login(user_credentials: schemas.UserLogin, db: Session = Depends(get_db)):
     """ログイン"""
-    user = authenticate_user(user_credentials.username, user_credentials.password, db)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    # アクセストークン生成
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": str(user.user_id)}, expires_delta=access_token_expires
-    )
-    
-    # パートナー情報を取得
-    partner = None
-    has_partner = False
-    if user.partner_id:
-        partner_user = db.query(User).filter(User.user_id == user.partner_id).first()
-        if partner_user:
-            partner = schemas.UserPublic(
-                user_id=partner_user.user_id,
-                username=partner_user.username,
-                display_name=partner_user.display_name,
-                profile_image_url=partner_user.profile_image_url
+    try:
+        print(f"Login attempt for user: {user_credentials.username}")
+        
+        user = authenticate_user(user_credentials.username, user_credentials.password, db)
+        if not user:
+            print(f"Authentication failed for user: {user_credentials.username}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
             )
-            has_partner = True
-    
-    user_with_partner = schemas.UserWithPartner(
-        **user.__dict__,
-        partner=partner,
-        has_partner=has_partner
-    )
-    
-    return schemas.TokenResponse(
-        access_token=access_token,
-        token_type="bearer",
-        user=user_with_partner
-    )
+        
+        print(f"User authenticated successfully: {user.username}")
+        
+        # アクセストークン生成
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": str(user.user_id)}, expires_delta=access_token_expires
+        )
+        print("Access token created successfully")
+        
+        # パートナー情報を取得
+        partner = None
+        has_partner = False
+        if user.partner_id:
+            partner_user = db.query(User).filter(User.user_id == user.partner_id).first()
+            if partner_user:
+                partner = schemas.UserPublic(
+                    user_id=partner_user.user_id,
+                    username=partner_user.username,
+                    display_name=partner_user.display_name,
+                    profile_image_url=partner_user.profile_image_url
+                )
+                has_partner = True
+        
+        user_with_partner = schemas.UserWithPartner(
+            **user.__dict__,
+            partner=partner,
+            has_partner=has_partner
+        )
+        
+        print(f"Login successful for user: {user.username}")
+        return schemas.TokenResponse(
+            access_token=access_token,
+            token_type="bearer",
+            user=user_with_partner
+        )
+        
+    except HTTPException:
+        # HTTPExceptionは再発生させる
+        raise
+    except Exception as e:
+        print(f"Unexpected error during login: {str(e)}")
+        print(f"Error type: {type(e)}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
 
 # ユーザー関連のエンドポイント
 @app.get("/users/me", response_model=schemas.UserWithPartner)
@@ -571,6 +629,18 @@ def mark_messages_as_read(
 @app.get("/")
 def read_root():
     return {"message": "Couple Chat API is running"}
+
+# CORS設定確認用エンドポイント（デバッグ用）
+@app.get("/debug/cors")
+def debug_cors():
+    """CORS設定を確認するためのデバッグエンドポイント"""
+    return {
+        "cors_origins": settings.CORS_ALLOW_ORIGINS,
+        "cors_methods": settings.CORS_ALLOW_METHODS,
+        "cors_headers": settings.CORS_ALLOW_HEADERS,
+        "cors_credentials": settings.CORS_ALLOW_CREDENTIALS,
+        "message": "CORS configuration"
+    }
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
