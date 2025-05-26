@@ -65,7 +65,9 @@ class Settings:
     
     _access_token_expire = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES")
     if not _access_token_expire:
-        raise ValueError("ACCESS_TOKEN_EXPIRE_MINUTES environment variable is required")
+        # 本番環境での緊急対応：デフォルト値を設定
+        print("WARNING: ACCESS_TOKEN_EXPIRE_MINUTES not set, using default value 30")
+        _access_token_expire = "30"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(_access_token_expire)
 
 settings = Settings()
