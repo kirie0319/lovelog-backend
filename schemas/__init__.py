@@ -4,7 +4,9 @@
 from .user import (
     UserBase, UserCreate, UserUpdate, UserResponse, 
     UserPublic, UserWithPartner, UserLogin, TokenResponse,
-    PartnerRequest, PartnerResponse
+    PartnerRequest, PartnerConnectById, PartnerConnectByCode, 
+    PartnerSearchResponse, PartnerConnectResponse, InviteCodeResponse,
+    PartnerResponse
 )
 
 from .message import (
@@ -16,7 +18,9 @@ __all__ = [
     # User schemas
     "UserBase", "UserCreate", "UserUpdate", "UserResponse", 
     "UserPublic", "UserWithPartner", "UserLogin", "TokenResponse",
-    "PartnerRequest", "PartnerResponse",
+    "PartnerRequest", "PartnerConnectById", "PartnerConnectByCode", 
+    "PartnerSearchResponse", "PartnerConnectResponse", "InviteCodeResponse",
+    "PartnerResponse",
     
     # Message schemas
     "MessageBase", "MessageCreate", "MessageResponse",

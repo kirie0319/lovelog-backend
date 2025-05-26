@@ -10,7 +10,8 @@ class MessageBase(BaseModel):
     file_url: Optional[str] = Field(None, description="ファイルURL")
 
 class MessageCreate(MessageBase):
-    receiver_id: int = Field(..., description="受信者ユーザーID")
+    # receiver_idを削除 - バックエンドで自動的にパートナーIDを設定
+    pass
 
 class MessageResponse(MessageBase):
     message_id: int

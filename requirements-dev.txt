@@ -1,0 +1,16 @@
+# Main dependencies
+-r requirements.txt
+
+# Development and debugging tools
+pytest
+pytest-asyncio
+pytest-cov
+black
+flake8
+isort
+mypy
+debugpy
+ipdb
+httpx  # For testing FastAPI
+requests
+pre-commit 

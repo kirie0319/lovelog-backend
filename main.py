@@ -1,8 +1,10 @@
 from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import HTTPBearer
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from typing import List
 from datetime import timedelta
+import uuid
 from models import User, Message
 import schemas
 from database import engine, get_db, Base
@@ -10,11 +12,21 @@ from auth import (
     hash_password, authenticate_user, create_access_token, 
     get_current_user, ACCESS_TOKEN_EXPIRE_MINUTES
 )
+from config import settings
 
 # データベーステーブルの作成
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Couple Chat API", description="カップル専用チャットアプリのAPI")
+
+# CORS設定
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ALLOW_ORIGINS,
+    allow_credentials=settings.CORS_ALLOW_CREDENTIALS,
+    allow_methods=settings.CORS_ALLOW_METHODS,
+    allow_headers=settings.CORS_ALLOW_HEADERS,
+)
 
 # 認証関連のエンドポイント
 @app.post("/auth/register", response_model=schemas.TokenResponse)
@@ -35,13 +47,17 @@ def register(user: schemas.UserCreate, db: Session = Depends(get_db)):
     # パスワードをハッシュ化
     hashed_password = hash_password(user.password)
     
+    # 一意の招待コードを生成
+    invite_code = str(uuid.uuid4())
+    
     # ユーザー作成
     db_user = User(
         username=user.username,
         email=user.email,
         display_name=user.display_name,
         profile_image_url=user.profile_image_url,
-        password_hash=hashed_password
+        password_hash=hashed_password,
+        invite_code=invite_code
     )
     
     db.add(db_user)
@@ -134,13 +150,199 @@ def get_current_user_info(current_user: User = Depends(get_current_user), db: Se
         has_partner=has_partner
     )
 
+@app.get("/users/my-invite-code", response_model=schemas.InviteCodeResponse)
+def get_my_invite_code(current_user: User = Depends(get_current_user)):
+    """自分の招待コードを取得"""
+    return schemas.InviteCodeResponse(
+        invite_code=current_user.invite_code,
+        message="Share this invite code with your partner to connect!"
+    )
+
+@app.post("/users/regenerate-invite-code", response_model=schemas.InviteCodeResponse)
+def regenerate_invite_code(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """招待コードを再生成（セキュリティ上の理由で変更したい場合）"""
+    # 既にパートナーがいる場合は再生成を拒否
+    if current_user.partner_id:
+        raise HTTPException(
+            status_code=400, 
+            detail="Cannot regenerate invite code while having a partner"
+        )
+    
+    # 新しい招待コードを生成
+    new_invite_code = str(uuid.uuid4())
+    current_user.invite_code = new_invite_code
+    
+    db.commit()
+    
+    return schemas.InviteCodeResponse(
+        invite_code=new_invite_code,
+        message="New invite code generated successfully!"
+    )
+
+# パートナー関連のエンドポイント
+@app.get("/users/search-by-code/{invite_code}", response_model=schemas.PartnerSearchResponse)
+def search_user_by_invite_code(
+    invite_code: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """招待コードでユーザーを検索（パートナー連携用）"""
+    # 招待コードの形式を検証
+    if not schemas.PartnerConnectByCode.validate_invite_code(invite_code):
+        raise HTTPException(status_code=400, detail="Invalid invite code format")
+    
+    # 検索対象ユーザーの取得
+    target_user = db.query(User).filter(User.invite_code == invite_code).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found with this invite code")
+    
+    # 自分自身を検索していないかチェック
+    if target_user.user_id == current_user.user_id:
+        raise HTTPException(status_code=400, detail="Cannot search yourself")
+    
+    # 連携可能かどうかを判定
+    can_connect = True
+    if current_user.partner_id or target_user.partner_id:
+        can_connect = False
+    
+    return schemas.PartnerSearchResponse(
+        user_id=target_user.user_id,
+        username=target_user.username,
+        display_name=target_user.display_name,
+        profile_image_url=target_user.profile_image_url,
+        invite_code=target_user.invite_code,
+        can_connect=can_connect
+    )
+
+@app.post("/users/partner-connect-by-code", response_model=schemas.PartnerConnectResponse)
+def connect_partner_by_invite_code(
+    request: schemas.PartnerConnectByCode,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """招待コードで直接連携（即座にチャット開始可能）"""
+    # 既にパートナーがいるかチェック
+    if current_user.partner_id:
+        raise HTTPException(status_code=400, detail="Already have a partner")
+    
+    # 招待コードの形式を検証
+    if not schemas.PartnerConnectByCode.validate_invite_code(request.invite_code):
+        raise HTTPException(status_code=400, detail="Invalid invite code format")
+    
+    # 連携対象のユーザーを取得
+    target_user = db.query(User).filter(User.invite_code == request.invite_code).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found with this invite code")
+    
+    # 対象ユーザーが既にパートナーがいるかチェック
+    if target_user.partner_id:
+        raise HTTPException(status_code=400, detail="Target user already has a partner")
+    
+    # 自分自身を指定していないかチェック
+    if target_user.user_id == current_user.user_id:
+        raise HTTPException(status_code=400, detail="Cannot connect to yourself")
+    
+    # パートナー関係を設定（双方向）
+    current_user.partner_id = target_user.user_id
+    target_user.partner_id = current_user.user_id
+    
+    db.commit()
+    
+    # パートナー情報を返す
+    partner_info = schemas.UserPublic(
+        user_id=target_user.user_id,
+        username=target_user.username,
+        display_name=target_user.display_name,
+        profile_image_url=target_user.profile_image_url
+    )
+    
+    return schemas.PartnerConnectResponse(
+        message="Partner connected successfully! You can now start chatting.",
+        partner=partner_info,
+        chat_ready=True
+    )
+
+@app.get("/users/search/{user_id}", response_model=schemas.PartnerSearchResponse)
+def search_user_by_id(
+    user_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """ユーザーIDでユーザーを検索（旧バージョン互換性のため残す）"""
+    # 検索対象ユーザーの取得
+    target_user = db.query(User).filter(User.user_id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    
+    # 自分自身を検索していないかチェック
+    if target_user.user_id == current_user.user_id:
+        raise HTTPException(status_code=400, detail="Cannot search yourself")
+    
+    # 連携可能かどうかを判定
+    can_connect = True
+    if current_user.partner_id or target_user.partner_id:
+        can_connect = False
+    
+    return schemas.PartnerSearchResponse(
+        user_id=target_user.user_id,
+        username=target_user.username,
+        display_name=target_user.display_name,
+        profile_image_url=target_user.profile_image_url,
+        invite_code=target_user.invite_code,
+        can_connect=can_connect
+    )
+
+@app.post("/users/partner-connect-by-id", response_model=schemas.PartnerConnectResponse)
+def connect_partner_by_id(
+    request: schemas.PartnerConnectById,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """パートナーIDで直接連携（旧バージョン互換性のため残す）"""
+    # 既にパートナーがいるかチェック
+    if current_user.partner_id:
+        raise HTTPException(status_code=400, detail="Already have a partner")
+    
+    # 連携対象のユーザーを取得
+    target_user = db.query(User).filter(User.user_id == request.partner_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="Partner user not found")
+    
+    # 対象ユーザーが既にパートナーがいるかチェック
+    if target_user.partner_id:
+        raise HTTPException(status_code=400, detail="Target user already has a partner")
+    
+    # 自分自身を指定していないかチェック
+    if target_user.user_id == current_user.user_id:
+        raise HTTPException(status_code=400, detail="Cannot connect to yourself")
+    
+    # パートナー関係を設定（双方向）
+    current_user.partner_id = target_user.user_id
+    target_user.partner_id = current_user.user_id
+    
+    db.commit()
+    
+    # パートナー情報を返す
+    partner_info = schemas.UserPublic(
+        user_id=target_user.user_id,
+        username=target_user.username,
+        display_name=target_user.display_name,
+        profile_image_url=target_user.profile_image_url
+    )
+    
+    return schemas.PartnerConnectResponse(
+        message="Partner connected successfully! You can now start chatting.",
+        partner=partner_info,
+        chat_ready=True
+    )
+
 @app.post("/users/partner-request")
 def send_partner_request(
     request: schemas.PartnerRequest, 
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """パートナー申請を送信"""
+    """パートナー申請を送信（ユーザー名で検索）"""
     # 既にパートナーがいるかチェック
     if current_user.partner_id:
         raise HTTPException(status_code=400, detail="Already have a partner")
@@ -165,6 +367,42 @@ def send_partner_request(
     db.commit()
     
     return {"message": "Partner connected successfully"}
+
+@app.get("/users/partner-status")
+def get_partner_status(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """現在のパートナー状態を取得"""
+    if not current_user.partner_id:
+        return {
+            "has_partner": False,
+            "message": "No partner connected",
+            "can_chat": False
+        }
+    
+    partner = db.query(User).filter(User.user_id == current_user.partner_id).first()
+    if not partner:
+        # パートナーが存在しない場合（データ整合性の問題）
+        current_user.partner_id = None
+        db.commit()
+        return {
+            "has_partner": False,
+            "message": "Partner not found, connection reset",
+            "can_chat": False
+        }
+    
+    return {
+        "has_partner": True,
+        "partner": {
+            "user_id": partner.user_id,
+            "username": partner.username,
+            "display_name": partner.display_name,
+            "profile_image_url": partner.profile_image_url
+        },
+        "can_chat": True,
+        "message": "Ready to chat!"
+    }
 
 @app.delete("/users/partner")
 def remove_partner(
@@ -195,19 +433,19 @@ def send_message(
     db: Session = Depends(get_db)
 ):
     """メッセージを送信"""
-    # 受信者の確認
-    receiver = db.query(User).filter(User.user_id == message.receiver_id).first()
-    if not receiver:
-        raise HTTPException(status_code=404, detail="Receiver not found")
+    # パートナーがいるかチェック
+    if not current_user.partner_id:
+        raise HTTPException(status_code=400, detail="No partner found")
     
-    # パートナー関係の確認
-    if current_user.partner_id != receiver.user_id:
-        raise HTTPException(status_code=403, detail="Can only send messages to your partner")
+    # パートナー情報を取得
+    partner = db.query(User).filter(User.user_id == current_user.partner_id).first()
+    if not partner:
+        raise HTTPException(status_code=404, detail="Partner not found")
     
-    # メッセージ作成
+    # メッセージ作成（receiver_idは自動的にパートナーIDに設定）
     db_message = Message(
         sender_id=current_user.user_id,
-        receiver_id=message.receiver_id,
+        receiver_id=current_user.partner_id,  # 自動的にパートナーIDを設定
         content=message.content,
         message_type=message.message_type,
         file_url=message.file_url

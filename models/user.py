@@ -4,6 +4,7 @@ from sqlalchemy import Column, Integer, String, DateTime, ForeignKey
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from database import Base
+import uuid
 
 class User(Base):
     __tablename__ = "users"
@@ -14,7 +15,11 @@ class User(Base):
     password_hash = Column(String(255), nullable=False)
     display_name = Column(String(100), nullable=False)
     profile_image_url = Column(String(255))
-    partner_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)  # パートナーのID
+    partner_id = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    
+    # 特殊な招待コード（UUID形式）
+    invite_code = Column(String(36), unique=True, index=True, nullable=False, default=lambda: str(uuid.uuid4()))
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     last_active = Column(DateTime(timezone=True), server_default=func.now())
     

@@ -9,7 +9,7 @@ class Settings:
     # CORS Configuration
     CORS_ALLOW_ORIGINS: List[str] = os.getenv(
         "CORS_ALLOW_ORIGINS", 
-        "http://localhost:3000,http://localhost:3001,http://127.0.0.1:3000"
+        "http://localhost:3000,http://127.0.0.1:3000"
     ).split(",")
     
     CORS_ALLOW_CREDENTIALS: bool = os.getenv("CORS_ALLOW_CREDENTIALS", "true").lower() == "true"
