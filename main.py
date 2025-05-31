@@ -15,6 +15,8 @@ from auth import (
 from config import settings
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from agents.orchestrator import AIOrchestrator
+import os
 
 # データベーステーブルの作成
 Base.metadata.create_all(bind=engine)
@@ -36,6 +38,12 @@ app.add_middleware(
     allow_headers=settings.CORS_ALLOW_HEADERS,
     expose_headers=["*"],
     max_age=3600,  # プリフライトキャッシュ時間
+)
+
+ai_orchestrator = AIOrchestrator(
+    openai_api_key=os.getenv("OPENAI_API_KEY"),
+    google_api_key=os.getenv("GOOGLE_API_KEY"),
+    google_cse_id=os.getenv("GOOGLE_CSE_ID")
 )
 
 # 明示的なプリフライトリクエストハンドリング
@@ -650,6 +658,97 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
         status_code=422,
         content={"detail": exc.errors(), "body": str(await request.body())}
     )
+
+@app.post("/ai/suggest-plans")
+async def ai_suggest_plans(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """AIボタンが押された時の処理"""
+    try:
+        # パートナーがいるかチェック
+        if not current_user.partner_id:
+            raise HTTPException(status_code=400, detail="パートナーが見つかりません")
+        
+        # 直近の会話履歴を取得（最新50件）
+        messages = db.query(Message).filter(
+            ((Message.sender_id == current_user.user_id) & (Message.receiver_id == current_user.partner_id)) |
+            ((Message.sender_id == current_user.partner_id) & (Message.receiver_id == current_user.user_id))
+        ).filter(
+            Message.is_deleted == False
+        ).order_by(Message.created_at.desc()).limit(50).all()
+        
+        # メッセージを辞書形式に変換
+        message_dicts = []
+        for msg in messages:
+            sender_info = current_user if msg.sender_id == current_user.user_id else db.query(User).filter(User.user_id == msg.sender_id).first()
+            message_dicts.append({
+                "content": msg.content,
+                "created_at": msg.created_at.isoformat(),
+                "sender": {
+                    "display_name": sender_info.display_name if sender_info else "Unknown"
+                }
+            })
+        
+        # AIオーケストレーターで処理
+        result = await ai_orchestrator.process_ai_request(message_dicts)
+        
+        return result
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"AI処理エラー: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail="AI処理中にエラーが発生しました"
+        )
+
+# テスト用の簡単なAIエンドポイント
+@app.post("/ai/test")
+async def ai_test(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """AIシステムの基本テスト"""
+    try:
+        # OpenAI APIキーが設定されているかチェック
+        openai_key = os.getenv("OPENAI_API_KEY")
+        if not openai_key:
+            return {
+                "success": False,
+                "error": "OPENAI_API_KEY not configured",
+                "message": "OpenAI APIキーが設定されていません"
+            }
+        
+        # 簡単なテストメッセージ
+        test_messages = [
+            {
+                "content": "今度の週末、どこか美味しいレストランに行きたいね",
+                "created_at": "2024-01-01T12:00:00",
+                "sender": {"display_name": "太郎"}
+            },
+            {
+                "content": "いいね！イタリアンとか和食とか、どっちがいい？",
+                "created_at": "2024-01-01T12:01:00", 
+                "sender": {"display_name": "花子"}
+            }
+        ]
+        
+        # AIオーケストレーターで処理
+        result = await ai_orchestrator.process_ai_request(test_messages)
+        
+        return result
+        
+    except Exception as e:
+        print(f"AI テストエラー: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "AIテスト中にエラーが発生しました"
+        }
 
 if __name__ == "__main__":
     import uvicorn
