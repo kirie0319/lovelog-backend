@@ -67,13 +67,13 @@ async def options_handler(request: Request, path: str):
     return JSONResponse(content={"message": "CORS not allowed"}, status_code=403)
 
 # リクエストログ用のミドルウェア
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    print(f"Request: {request.method} {request.url}")
-    print(f"Headers: {dict(request.headers)}")
-    response = await call_next(request)
-    print(f"Response status: {response.status_code}")
-    return response
+# @app.middleware("http")
+# async def log_requests(request: Request, call_next):
+#     print(f"Request: {request.method} {request.url}")
+#     print(f"Headers: {dict(request.headers)}")
+#     response = await call_next(request)
+#     print(f"Response status: {response.status_code}")
+#     return response
 
 # 認証関連のエンドポイント
 @app.post("/auth/register", response_model=schemas.TokenResponse)
@@ -1130,4 +1130,10 @@ async def debug_plan_suggestion():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=8000,
+        log_level="warning",  # エラーレベルを warning に設定してアクセスログを減らす
+        access_log=False      # アクセスログを完全に無効化
+    )
